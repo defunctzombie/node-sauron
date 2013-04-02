@@ -1,0 +1,168 @@
+#!/usr/bin/env node
+var fs = require('fs');
+var path = require('path');
+
+var procfile = require('procfile');
+var daemon = require('daemon');
+
+var monitor = require.resolve('../monitor');
+
+var procfilename = 'procfile';
+var procpath = path.resolve(process.cwd, path.dirname(procfilename));
+var data = fs.readFileSync(procfilename, 'utf8');
+
+var basedir = path.join(process.env.HOME, '.sauron');
+var piddir = path.join(basedir, 'pid');
+var logdir = path.join(basedir, 'log');
+
+function mkfs(path) {
+    if (!fs.existsSync(path)) {
+        fs.mkdirSync(path);
+    }
+}
+
+mkfs(basedir);
+mkfs(piddir);
+mkfs(logdir);
+
+var args = process.argv.slice(2);
+
+// default is to just list what we could run
+var cmd = args.shift();
+
+switch (cmd) {
+case 'start':
+    return start();
+case 'list':
+    return list();
+case 'stop':
+    return stop();
+case 'restart':
+    return restart();
+default:
+    console.error('not a valid command:', cmd);
+    return process.exit(1);
+}
+
+return;
+
+// list all running processes
+// TODO list processes in procfile and which are running?
+function list() {
+    var pids = fs.readdirSync(piddir);
+    pids.forEach(function(pidfile) {
+        var pid = fs.readFileSync(path.join(piddir, pidfile), 'utf8');
+        var ident = pidfile.replace('.pid', '');
+        var logfile = path.join(logdir, ident + '.log');
+
+        try {
+            // check that process is still running
+            process.kill(pid, 0)
+            console.log(ident, '[' + pid + ']', logfile);
+        }
+        catch (err) {
+            if (err.code === 'ESRCH') {
+                console.log(ident, 'is no longer alive');
+                fs.unlinkSync(path.join(piddir, pidfile));
+            }
+        }
+    });
+    return;
+}
+
+// stop a single process or all processes
+function stop(ident, restart) {
+    ident = ident || args.shift();
+    if (!ident) {
+        return stopall(restart);
+    }
+
+    var pidfile = path.join(piddir, ident + '.pid');
+
+    if (!fs.existsSync(pidfile)) {
+        console.error('no process with ident [%s] found', ident);
+        return process.exit(1);
+    }
+
+    var pid = fs.readFileSync(pidfile, 'utf8');
+
+    var signal = restart ? 'SIGHUP' : 'SIGTERM';
+    try {
+        process.kill(pid, signal);
+    } catch (err) {
+        if (err.code === 'ESRCH') {
+            console.error('no process for pid %d found', pid);
+            // remove the stale pidfile
+            fs.unlinkSync(pidfile);
+            return;
+        }
+
+        console.error(err);
+    }
+}
+
+function stopall(restart) {
+    // TODO (shtylman) confirm stop all
+
+    var pids = fs.readdirSync(piddir);
+    if (pids.length === 0) {
+        console.log('nothing running');
+    }
+
+    pids.forEach(function(pidfile) {
+        var ident = pidfile.replace('.pid', '');
+        stop(ident, restart);
+    });
+}
+
+function restart(ident) {
+    return stop(ident, true);
+}
+
+function start(to_start) {
+    to_start = to_start || args.shift();
+
+    var proc = procfile.parse(data);
+    Object.keys(proc).forEach(function(proc_name) {
+        var details = proc[proc_name];
+
+        var ident = proc_name;
+        if (to_start && ident !== to_start) {
+            return;
+        }
+
+        console.log('starting', proc_name, '->', details.command, details.options.join(' '));
+        var stdout = path.join(logdir, ident + '.log');
+        var pidfile = path.join(piddir, ident + '.pid');
+
+        // check for already running
+        if (fs.existsSync(pidfile)) {
+            console.log(ident, 'is already running');
+            return;
+        }
+
+        // capture initial environment
+        var env = process.env;
+        // sauron wrapper cleans up pidfile on exit
+        // needs to know the pidfile
+        env.PIDFILE = pidfile;
+
+        var opt = {
+            stdout: fs.openSync(stdout, 'a'),
+            stderr: fs.openSync(stdout, 'a'),
+            // this way the child can manage the pid lifetime if it dies
+            env: env,
+            cwd: procpath
+        };
+
+        // wrap the script to launch with sauron process manager
+        var script = details.command;
+        var args = details.options;
+        args.unshift(script);
+
+        var child = daemon.daemon(monitor, args, opt);
+        fs.writeFileSync(pidfile, child.pid, 'utf8');
+    });
+}
+
+// vim: ft=javascript
