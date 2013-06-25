@@ -8,7 +8,7 @@ var daemon = require('daemon');
 var monitor = require.resolve('../monitor');
 
 var procfilename = 'procfile';
-var procpath = path.resolve(process.cwd, path.dirname(procfilename));
+var procpath = path.resolve(process.cwd(), path.dirname(procfilename));
 var data = fs.readFileSync(procfilename, 'utf8');
 
 var basedir = path.join(process.env.HOME, '.sauron');
